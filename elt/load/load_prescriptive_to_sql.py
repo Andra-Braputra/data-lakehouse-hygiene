@@ -3,11 +3,12 @@ import boto3
 from botocore.client import Config
 from sqlalchemy import create_engine
 import io
+import os
 
 # ======================================================
 # MINIO
 # ======================================================
-MINIO_ENDPOINT = "http://localhost:9000"
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
 ACCESS_KEY = "minioadmin"
 SECRET_KEY = "minioadmin123"
 

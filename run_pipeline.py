@@ -18,10 +18,6 @@ def run(step_name, command):
 
     print(f"✅ SELESAI: {step_name}")
 
-run(
-    "Inisialisasi MinIO",
-    "python init_minio.py"
-)
 
 # ==================================================
 # INGESTION → RAW ZONE

@@ -3,8 +3,10 @@ import pandas as pd
 import boto3
 from botocore.client import Config
 import io
+import os
+from deltalake.writer import write_deltalake
 
-MINIO_ENDPOINT = "http://localhost:9000"
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
 ACCESS_KEY = "minioadmin"
 SECRET_KEY = "minioadmin123"
 
@@ -19,6 +21,15 @@ s3 = boto3.client(
     config=Config(signature_version="s3v4"),
     region_name="us-east-1"
 )
+
+storage_options = {
+    "AWS_ACCESS_KEY_ID": ACCESS_KEY,
+    "AWS_SECRET_ACCESS_KEY": SECRET_KEY,
+    "AWS_ENDPOINT_URL": MINIO_ENDPOINT,
+    "AWS_S3_ALLOW_UNSAFE_RENAME": "true",
+    "AWS_REGION": "us-east-1",
+    "AWS_ALLOW_HTTP": "true",
+}
 
 def get_latest_json(bucket, prefix):
     response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
@@ -35,40 +46,44 @@ def get_latest_json(bucket, prefix):
 # ===============================
 # AMBIL RAW TERBARU
 # ===============================
-aqi_key = get_latest_json(RAW_BUCKET, "api/aqicn/")
-print(f"[RAW AQICN] pakai → {aqi_key}")
+try:
+    aqi_key = get_latest_json(RAW_BUCKET, "api/aqicn/")
+    print(f"[RAW AQICN] pakai → {aqi_key}")
 
-obj = s3.get_object(Bucket=RAW_BUCKET, Key=aqi_key)
-raw = json.loads(obj["Body"].read())
+    obj = s3.get_object(Bucket=RAW_BUCKET, Key=aqi_key)
+    raw = json.loads(obj["Body"].read())
 
-if raw.get("status") != "ok":
-    raise ValueError("Status AQICN tidak OK")
+    if raw.get("status") != "ok":
+        raise ValueError("Status AQICN tidak OK")
 
-data = raw.get("data", {})
+    data = raw.get("data", {})
 
-# ===============================
-# NORMALISASI
-# ===============================
-df = pd.DataFrame([{
-    "datetime": data.get("time", {}).get("s"),
-    "aqi": data.get("aqi"),
-    "pm25": data.get("iaqi", {}).get("pm25", {}).get("v"),
-    "pm10": data.get("iaqi", {}).get("pm10", {}).get("v"),
-    "dominant_pollutant": data.get("dominentpol")
-}])
+    # ===============================
+    # NORMALISASI
+    # ===============================
+    df = pd.DataFrame([{
+        "datetime": data.get("time", {}).get("s"),
+        "aqi": data.get("aqi"),
+        "pm25": data.get("iaqi", {}).get("pm25", {}).get("v"),
+        "pm10": data.get("iaqi", {}).get("pm10", {}).get("v"),
+        "dominant_pollutant": data.get("dominentpol")
+    }])
 
-df["datetime"] = pd.to_datetime(df["datetime"])
+    df["datetime"] = pd.to_datetime(df["datetime"])
 
-# ===============================
-# SIMPAN CLEAN
-# ===============================
-buffer = io.StringIO()
-df.to_csv(buffer, index=False)
+    # ===============================
+    # SIMPAN CLEAN (DELTA)
+    # ===============================
+    path = f"s3://{CLEAN_BUCKET}/api/aqi"
+    print(f"   💾 Menyimpan Delta: {path}")
+    
+    write_deltalake(
+        path,
+        df,
+        mode="overwrite", 
+        storage_options=storage_options
+    )
+    print("✅ CLEAN AQICN SELESAI")
 
-s3.put_object(
-    Bucket=CLEAN_BUCKET,
-    Key="api/aqi.csv",
-    Body=buffer.getvalue()
-)
-
-print("[CLEAN AQICN] api/aqi.csv berhasil dibuat")
+except Exception as e:
+    print(f"❌ Gagal Clean AQICN: {e}")

@@ -5,11 +5,13 @@ from datetime import datetime
 import requests
 import io
 import csv
+import os
 
 # ======================================================
 # GOOGLE SHEETS
 # ======================================================
-SHEET_ID = "1rzafmIPkUhwoWoa8C2sygm6ch86K53N-zPIgXaPV_wo"
+# Gunakan env var kalau ada, kalau tidak ada pakai ID default
+SHEET_ID = os.getenv("SHEET_ID", "1rzafmIPkUhwoWoa8C2sygm6ch86K53N-zPIgXaPV_wo")
 
 URLS = {
     "catatan_aktivitas": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=aktivitas_manual",
@@ -18,11 +20,12 @@ URLS = {
 }
 
 # ======================================================
-# MINIO
+# MINIO (SMART CONFIG)
 # ======================================================
-MINIO_ENDPOINT = "http://localhost:9000"
-ACCESS_KEY = "minioadmin"
-SECRET_KEY = "minioadmin123"
+# Otomatis deteksi: Jalan di Airflow (minio) atau Laptop (localhost)
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
+ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin123")
 RAW_BUCKET = "raw-zone"
 
 s3 = boto3.client(
@@ -68,23 +71,38 @@ def read_sheet_csv(url):
     return df
 
 # ======================================================
-# INGEST
+# INGEST (DIRECT UPLOAD)
 # ======================================================
 print("==============================")
 print("▶ Ingest Google Sheets → Raw Zone")
+print(f"  Target MinIO: {MINIO_ENDPOINT}")
 print("==============================")
 
 for name, url in URLS.items():
-    df = read_sheet_csv(url)
+    try:
+        df = read_sheet_csv(url)
+        print(f"[CHECK] {name} columns → {list(df.columns)}")
 
-    print(f"[CHECK] {name} columns → {list(df.columns)}")
+        filename = f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        key = f"sheets/{name}/{filename}"
 
-    filename = f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    key = f"sheets/{name}/{filename}"
+        # --- UPDATE: Pakai Buffer (Memory) ---
+        csv_buffer = io.StringIO()
+        df.to_csv(csv_buffer, index=False)
+        
+        s3.put_object(
+            Bucket=RAW_BUCKET,
+            Key=key,
+            Body=csv_buffer.getvalue()
+        )
+        # -------------------------------------
 
-    df.to_csv(filename, index=False)
-    s3.upload_file(filename, RAW_BUCKET, key)
+        print(f"[RAW] {name} → {key}")
 
-    print(f"[RAW] {name} → {key}")
+    except Exception as e:
+        print(f"❌ Gagal ingest {name}: {e}")
+        # Jangan raise error dulu biar sheet lain tetap dicoba
+        # Tapi kalau mau strict (gagal satu gagal semua), uncomment baris bawah:
+        # raise e
 
 print("✅ INGESTION SHEETS SELESAI")

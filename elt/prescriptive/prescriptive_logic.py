@@ -4,11 +4,11 @@ from botocore.client import Config
 import io
 from datetime import datetime
 from deltalake import DeltaTable
-
+import os
 # ======================================================
 # KONFIGURASI MINIO
 # ======================================================
-MINIO_ENDPOINT = "http://localhost:9000"
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
 ACCESS_KEY = "minioadmin"
 SECRET_KEY = "minioadmin123"
 
@@ -24,64 +24,67 @@ s3 = boto3.client(
     region_name="us-east-1"
 )
 
+# Konfigurasi khusus Delta Lake
 storage_options = {
-    "AWS_ACCESS_KEY_ID": "minioadmin",
-    "AWS_SECRET_ACCESS_KEY": "minioadmin123",
-    "AWS_ENDPOINT_URL": "http://localhost:9000",
+    "AWS_ACCESS_KEY_ID": ACCESS_KEY,
+    "AWS_SECRET_ACCESS_KEY": SECRET_KEY,
+    "AWS_ENDPOINT_URL": MINIO_ENDPOINT,
     "AWS_S3_ALLOW_UNSAFE_RENAME": "true",
     "AWS_REGION": "us-east-1",
+    "AWS_ALLOW_HTTP": "true", # Penting!
 }
 
 # ======================================================
-# HELPER
+# HELPER FUNCTIONS
 # ======================================================
-def read_data(bucket, path):
+def read_data_delta(bucket, path):
+    """Membaca folder Delta Table"""
     full_path = f"s3://{bucket}/{path}"
+    print(f"   📂 Membaca Delta: {full_path}")
     try:
-        # Coba baca sebagai Delta Table
         dt = DeltaTable(full_path, storage_options=storage_options)
         return dt.to_pandas()
-    except Exception:
-        # Fallback: Kalau gagal (mungkin masih CSV lama), pakai Boto3
-        print(f"⚠️ {path} bukan Delta Table, mencoba baca CSV biasa...")
-        obj = s3.get_object(Bucket=bucket, Key=path + ".csv") # Asumsi ekstensi .csv
-        return pd.read_csv(io.BytesIO(obj["Body"].read()))
+    except Exception as e:
+        print(f"   ⚠️ Gagal baca Delta '{path}': {e}")
+        # Kembalikan empty dataframe biar logic gak crash total
+        return pd.DataFrame()
 
 def write_csv(df, bucket, key):
+    """Menyimpan hasil akhir ke CSV (Curated)"""
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
+    print(f"   💾 Tersimpan: {key}")
 
 # ======================================================
-# LOAD CLEAN DATA
+# LOAD CLEAN DATA (SEMUA DARI DELTA)
 # ======================================================
-print("Load data dari Clean Zone...")
-catatan = read_data(CLEAN_BUCKET, "sheets/catatan_aktivitas")
-master = read_data(CLEAN_BUCKET, "sheets/master_aktivitas")
-preferensi = read_data(CLEAN_BUCKET, "sheets/preferensi")
+print("--- LOAD DATA ---")
 
+# 1. Load Sheets (Pasti ada)
 try:
-    mandi = read_csv(CLEAN_BUCKET, "sql/log_mandi.csv")
-except:
-    mandi = pd.DataFrame(columns=["waktu_mandi"])
+    catatan = read_data_delta(CLEAN_BUCKET, "sheets/catatan_aktivitas")
+    master = read_data_delta(CLEAN_BUCKET, "sheets/master_aktivitas")
+    preferensi = read_data_delta(CLEAN_BUCKET, "sheets/preferensi")
+except Exception as e:
+    print(f"❌ Error fatal membaca data utama: {e}")
+    raise e
 
-try:
-    bmkg = read_csv(CLEAN_BUCKET, "api/bmkg.csv")
-except:
-    bmkg = pd.DataFrame()
-
-try:
-    aqi = read_csv(CLEAN_BUCKET, "api/aqi.csv")
-except:
-    aqi = pd.DataFrame()
+# 2. Load Data Pendukung (Log Mandi, BMKG, AQI) - SEKARANG PAKAI DELTA JUGA
+mandi = read_data_delta(CLEAN_BUCKET, "sql/log_mandi")
+bmkg = read_data_delta(CLEAN_BUCKET, "api/bmkg")
+aqi = read_data_delta(CLEAN_BUCKET, "api/aqi")
 
 # ======================================================
 # PARSE WAKTU
 # ======================================================
 catatan["timestamp"] = pd.to_datetime(catatan["timestamp"], errors="coerce")
 
-if not mandi.empty:
+if not mandi.empty and "waktu_mandi" in mandi.columns:
     mandi["waktu_mandi"] = pd.to_datetime(mandi["waktu_mandi"], errors="coerce")
+else:
+    # Jaga-jaga kalau tabel ada tapi kosong atau kolom salah
+    mandi = pd.DataFrame(columns=["waktu_mandi"])
 
 bmkg_latest = None
 if not bmkg.empty:
@@ -96,12 +99,22 @@ if not aqi.empty:
 # ======================================================
 # 1️⃣ WINDOW AKTIVITAS
 # ======================================================
+# Logic: Ambil waktu mandi PALING BARU (Max)
 if mandi.empty or mandi["waktu_mandi"].dropna().empty:
+    print("   ⚠️ Belum pernah mandi (data kosong), ambil aktivitas paling awal.")
     waktu_mandi_terakhir = catatan["timestamp"].min()
 else:
     waktu_mandi_terakhir = mandi["waktu_mandi"].max()
 
+# Handle jika masih NaT (Not a Time)
+if pd.isna(waktu_mandi_terakhir):
+    waktu_mandi_terakhir = datetime.now()
+
+print(f"🚿 Mandi terakhir terdeteksi: {waktu_mandi_terakhir}")
+
+# Filter aktivitas SETELAH mandi terakhir
 aktivitas_window = catatan[catatan["timestamp"] > waktu_mandi_terakhir]
+print(f"   Jumlah aktivitas baru: {len(aktivitas_window)}")
 
 # ======================================================
 # 2️⃣ SKOR KEKOTORAN (FISIK)
@@ -110,6 +123,9 @@ if aktivitas_window.empty:
     skor_kekotoran_dasar = 0
 else:
     df_kotor = aktivitas_window.merge(master, on="id_aktivitas", how="left")
+    # Fillna untuk bobot jaga-jaga
+    df_kotor["bobot_kotor"] = df_kotor["bobot_kotor"].fillna(0)
+    
     df_kotor["skor_kotor"] = (
         df_kotor["durasi_menit"] * df_kotor["bobot_kotor"]
     )
@@ -134,16 +150,18 @@ jam_sejak_mandi = (
     (datetime.now() - waktu_mandi_terakhir).total_seconds() / 3600
 )
 
-aktivitas_bau = aktivitas_window.merge(master, on="id_aktivitas", how="left")
-aktivitas_bau = aktivitas_bau[aktivitas_bau["bobot_bau"] <= 2]
-
-jumlah_aktivitas_bau = len(aktivitas_bau)
+# Hitung jumlah aktivitas yang bikin bau
+if not aktivitas_window.empty:
+    aktivitas_bau = aktivitas_window.merge(master, on="id_aktivitas", how="left")
+    jumlah_aktivitas = len(aktivitas_bau)
+else:
+    jumlah_aktivitas = 0
 
 faktor_lembap = bmkg_latest["humidity"] / 100 if bmkg_latest is not None else 0.5
 
 skor_bau = (
     jam_sejak_mandi * 0.3
-    + jumlah_aktivitas_bau * 0.5
+    + jumlah_aktivitas * 0.5
     + faktor_lembap * 2
 )
 
@@ -157,22 +175,25 @@ skor_aqi = round(aqi_latest["aqi"] / 50, 2) if aqi_latest is not None else 0
 # ======================================================
 # 5️⃣ PREFERENSI
 # ======================================================
-def pref(name, default):
-    row = preferensi.loc[preferensi["parameter"] == name, "nilai"]
-    return float(row.iloc[0]) if not row.empty else default
+def get_pref(name, default):
+    try:
+        row = preferensi.loc[preferensi["parameter"] == name, "nilai"]
+        return float(row.iloc[0]) if not row.empty else default
+    except:
+        return default
 
-bobot_kotor = pref("bobot_kotor", 0.4)
-bobot_bau = pref("bobot_bau", 0.3)
-bobot_aqi = pref("bobot_aqi", 0.3)
-threshold = pref("threshold_mandi", 6)
+bobot_kotor_user = get_pref("bobot_kotor", 0.4)
+bobot_bau_user = get_pref("bobot_bau", 0.3)
+bobot_aqi_user = get_pref("bobot_aqi", 0.3)
+threshold = get_pref("threshold_mandi", 6)
 
 # ======================================================
 # 6️⃣ SKOR FINAL
 # ======================================================
 skor_final = round(
-    skor_kekotoran * bobot_kotor
-    + skor_bau * bobot_bau
-    + skor_aqi * bobot_aqi,
+    skor_kekotoran * bobot_kotor_user
+    + skor_bau * bobot_bau_user
+    + skor_aqi * bobot_aqi_user,
     2
 )
 
@@ -198,5 +219,5 @@ hasil = pd.DataFrame([{
 
 write_csv(hasil, CURATED_BUCKET, "prescriptive/hasil_preskriptif.csv")
 
-print("✅ PRESCRIPTIVE FINAL BERHASIL (AUDIT CLEAN)")
+print("✅ PRESCRIPTIVE FINAL BERHASIL")
 print(hasil)

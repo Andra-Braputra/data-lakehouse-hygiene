@@ -1,12 +1,91 @@
 version: "3.9"
 
+# Template konfigurasi biar gak ngetik ulang
+x-airflow-common: &airflow-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+
+    # --- ENV KHUSUS PROYEK KAMU (HARDCODED) ---
+    # Ganti localhost jadi 'minio' karena jalan di dalam network docker
+    MINIO_ENDPOINT: "http://minio:9000"
+    MINIO_ACCESS_KEY: "minioadmin"
+    MINIO_SECRET_KEY: "minioadmin123"
+    # URL Database Neon kamu
+    DATABASE_URL: "postgresql://neondb_owner:npg_B7ysWvCoLix2@ep-still-surf-ad9wrml7-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require"
+
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - ../ingestion:/opt/airflow/ingestion
+    - ../elt:/opt/airflow/elt
+    - ../utils:/opt/airflow/utils
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+
 services:
+  # === DATABASE AIRFLOW (Internal) ===
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  # === AIRFLOW WEBSERVER (UI) ===
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # === AIRFLOW SCHEDULER (Otak) ===
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # === AIRFLOW INIT (Setup Awal) ===
+  airflow-init:
+    <<: *airflow-common
+    command: version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_UPGRADE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: "admin"
+      _AIRFLOW_WWW_USER_PASSWORD: "admin"
+
+  # === MINIO ===
   minio:
     image: minio/minio
     container_name: minio
     ports:
-      - "9000:9000" # API
-      - "9001:9001" # Console
+      - "9000:9000"
+      - "9001:9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin123
@@ -19,15 +98,7 @@ services:
       timeout: 5s
       retries: 5
 
-  metabase:
-    image: metabase/metabase:latest
-    container_name: metabase
-    ports:
-      - "3000:3000"
-    depends_on:
-      - minio
-    restart: unless-stopped
-
+  # === AUTO CREATE BUCKETS ===
   createbuckets:
     image: minio/mc
     depends_on:
@@ -41,6 +112,16 @@ services:
       /usr/bin/mc mb --ignore-existing myminio/curated-zone;
       exit 0;
       "
+
+  # === METABASE ===
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase
+    ports:
+      - "3000:3000"
+    depends_on:
+      - minio
+    restart: unless-stopped
 
 volumes:
   minio_data:
