@@ -3,6 +3,7 @@ import boto3
 from botocore.client import Config
 import io
 from datetime import datetime
+from deltalake import DeltaTable
 
 # ======================================================
 # KONFIGURASI MINIO
@@ -23,12 +24,28 @@ s3 = boto3.client(
     region_name="us-east-1"
 )
 
+storage_options = {
+    "AWS_ACCESS_KEY_ID": "minioadmin",
+    "AWS_SECRET_ACCESS_KEY": "minioadmin123",
+    "AWS_ENDPOINT_URL": "http://localhost:9000",
+    "AWS_S3_ALLOW_UNSAFE_RENAME": "true",
+    "AWS_REGION": "us-east-1",
+}
+
 # ======================================================
 # HELPER
 # ======================================================
-def read_csv(bucket, key):
-    obj = s3.get_object(Bucket=bucket, Key=key)
-    return pd.read_csv(io.BytesIO(obj["Body"].read()))
+def read_data(bucket, path):
+    full_path = f"s3://{bucket}/{path}"
+    try:
+        # Coba baca sebagai Delta Table
+        dt = DeltaTable(full_path, storage_options=storage_options)
+        return dt.to_pandas()
+    except Exception:
+        # Fallback: Kalau gagal (mungkin masih CSV lama), pakai Boto3
+        print(f"⚠️ {path} bukan Delta Table, mencoba baca CSV biasa...")
+        obj = s3.get_object(Bucket=bucket, Key=path + ".csv") # Asumsi ekstensi .csv
+        return pd.read_csv(io.BytesIO(obj["Body"].read()))
 
 def write_csv(df, bucket, key):
     buf = io.StringIO()
@@ -38,9 +55,10 @@ def write_csv(df, bucket, key):
 # ======================================================
 # LOAD CLEAN DATA
 # ======================================================
-catatan = read_csv(CLEAN_BUCKET, "sheets/catatan_aktivitas.csv")
-master = read_csv(CLEAN_BUCKET, "sheets/master_aktivitas.csv")
-preferensi = read_csv(CLEAN_BUCKET, "sheets/preferensi.csv")
+print("Load data dari Clean Zone...")
+catatan = read_data(CLEAN_BUCKET, "sheets/catatan_aktivitas")
+master = read_data(CLEAN_BUCKET, "sheets/master_aktivitas")
+preferensi = read_data(CLEAN_BUCKET, "sheets/preferensi")
 
 try:
     mandi = read_csv(CLEAN_BUCKET, "sql/log_mandi.csv")

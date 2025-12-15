@@ -2,6 +2,8 @@ import pandas as pd
 import boto3
 from botocore.client import Config
 import io
+import os
+from deltalake.writer import write_deltalake
 
 # ======================================================
 # MINIO
@@ -21,6 +23,14 @@ s3 = boto3.client(
     config=Config(signature_version="s3v4"),
     region_name="us-east-1"
 )
+
+storage_options = {
+    "AWS_ACCESS_KEY_ID": "minioadmin",
+    "AWS_SECRET_ACCESS_KEY": "minioadmin123",
+    "AWS_ENDPOINT_URL": "http://localhost:9000",
+    "AWS_S3_ALLOW_UNSAFE_RENAME": "true",  # Wajib untuk MinIO
+    "AWS_REGION": "us-east-1",
+}
 
 # ======================================================
 # HELPER
@@ -45,10 +55,18 @@ def normalize_columns(df):
     )
     return df
 
-def write_csv(df, bucket, key):
-    buf = io.StringIO()
-    df.to_csv(buf, index=False)
-    s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
+def save_to_delta(df, bucket, table_name):
+    # Path format: s3://bucket/folder
+    path = f"s3://{bucket}/{table_name}"
+    
+    print(f"   💾 Menyimpan ke Delta Table: {path} ...")
+    
+    write_deltalake(
+        path,
+        df,
+        mode="overwrite",  # Atau 'append' jika ingin menumpuk
+        storage_options=storage_options
+    )
 
 # ======================================================
 # LOAD RAW
@@ -112,8 +130,9 @@ preferensi = preferensi.dropna()
 # ======================================================
 # SIMPAN CLEAN
 # ======================================================
-write_csv(catatan, CLEAN_BUCKET, "sheets/catatan_aktivitas.csv")
-write_csv(master, CLEAN_BUCKET, "sheets/master_aktivitas.csv")
-write_csv(preferensi, CLEAN_BUCKET, "sheets/preferensi.csv")
+# Perhatikan nama file tidak pakai .csv lagi, tapi jadi folder tabel
+save_to_delta(catatan, CLEAN_BUCKET, "sheets/catatan_aktivitas")
+save_to_delta(master, CLEAN_BUCKET, "sheets/master_aktivitas")
+save_to_delta(preferensi, CLEAN_BUCKET, "sheets/preferensi")
 
-print("✅ CLEAN SHEETS SELESAI")
+print("✅ CLEAN SHEETS SELESAI (Saved as Delta Lake)")
