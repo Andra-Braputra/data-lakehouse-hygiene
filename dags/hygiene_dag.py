@@ -2,18 +2,16 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from datetime import datetime, timedelta
 
-# Default Settings
 default_args = {
     'owner': 'andra',
-    'retries': 0, # Jangan retry dulu biar ketahuan errornya
+    'retries': 0,
     'start_date': datetime(2023, 1, 1),
 }
 
-# Definisi DAG (Jadwal: Jam 6 Pagi Setiap Hari)
 with DAG(
     dag_id='hygiene_lakehouse_pipeline',
     default_args=default_args,
-    schedule_interval='0 6 * * *', 
+    schedule_interval=None, 
     catchup=False
 ) as dag:
 
