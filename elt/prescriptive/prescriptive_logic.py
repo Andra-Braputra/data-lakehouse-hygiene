@@ -2,90 +2,79 @@ import pandas as pd
 import boto3
 from botocore.client import Config
 import io
-from datetime import datetime
+from datetime import datetime, timedelta  # <--- Tambah timedelta
 from deltalake import DeltaTable
+from deltalake.writer import write_deltalake
 import os
+
 # ======================================================
-# KONFIGURASI MINIO
+# KONFIGURASI ENV & MINIO
 # ======================================================
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
-ACCESS_KEY = "minioadmin"
-SECRET_KEY = "minioadmin123"
+ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin123")
 
 CLEAN_BUCKET = "clean-zone"
 CURATED_BUCKET = "curated-zone"
 
-s3 = boto3.client(
-    "s3",
-    endpoint_url=MINIO_ENDPOINT,
-    aws_access_key_id=ACCESS_KEY,
-    aws_secret_access_key=SECRET_KEY,
-    config=Config(signature_version="s3v4"),
-    region_name="us-east-1"
-)
-
-# Konfigurasi khusus Delta Lake
+# Config Delta Lake
 storage_options = {
     "AWS_ACCESS_KEY_ID": ACCESS_KEY,
     "AWS_SECRET_ACCESS_KEY": SECRET_KEY,
     "AWS_ENDPOINT_URL": MINIO_ENDPOINT,
     "AWS_S3_ALLOW_UNSAFE_RENAME": "true",
     "AWS_REGION": "us-east-1",
-    "AWS_ALLOW_HTTP": "true", # Penting!
+    "AWS_ALLOW_HTTP": "true",
 }
 
 # ======================================================
 # HELPER FUNCTIONS
 # ======================================================
 def read_data_delta(bucket, path):
-    """Membaca folder Delta Table"""
+    """Membaca folder Delta Table ke Pandas DataFrame"""
     full_path = f"s3://{bucket}/{path}"
-    print(f"   📂 Membaca Delta: {full_path}")
+    print(f"📂 Membaca Delta: {full_path}")
     try:
         dt = DeltaTable(full_path, storage_options=storage_options)
         return dt.to_pandas()
     except Exception as e:
-        print(f"   ⚠️ Gagal baca Delta '{path}': {e}")
-        # Kembalikan empty dataframe biar logic gak crash total
+        print(f"⚠️ Gagal baca Delta '{path}': {e}")
         return pd.DataFrame()
 
-def write_csv(df, bucket, key):
-    """Menyimpan hasil akhir ke CSV (Curated)"""
-    buf = io.StringIO()
-    df.to_csv(buf, index=False)
-    s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
-    print(f"   💾 Tersimpan: {key}")
-
 # ======================================================
-# LOAD CLEAN DATA (SEMUA DARI DELTA)
+# LOAD DATA (SEMUA DARI CLEAN ZONE)
 # ======================================================
-print("--- LOAD DATA ---")
+print("--- LOAD DATA (PANDAS ENGINE) ---")
 
-# 1. Load Sheets (Pasti ada)
 try:
     catatan = read_data_delta(CLEAN_BUCKET, "sheets/catatan_aktivitas")
     master = read_data_delta(CLEAN_BUCKET, "sheets/master_aktivitas")
     preferensi = read_data_delta(CLEAN_BUCKET, "sheets/preferensi")
+    mandi = read_data_delta(CLEAN_BUCKET, "sql/log_mandi")
+    bmkg = read_data_delta(CLEAN_BUCKET, "api/bmkg")
+    aqi = read_data_delta(CLEAN_BUCKET, "api/aqi")
 except Exception as e:
-    print(f"❌ Error fatal membaca data utama: {e}")
+    print(f"❌ Error fatal membaca data: {e}")
     raise e
 
-# 2. Load Data Pendukung (Log Mandi, BMKG, AQI) - SEKARANG PAKAI DELTA JUGA
-mandi = read_data_delta(CLEAN_BUCKET, "sql/log_mandi")
-bmkg = read_data_delta(CLEAN_BUCKET, "api/bmkg")
-aqi = read_data_delta(CLEAN_BUCKET, "api/aqi")
+# ======================================================
+# DATA PREPARATION & TIMEZONE FIX (MANUAL)
+# ======================================================
+# Docker biasanya UTC. Kita paksa tambah 8 jam (WITA) atau 7 jam (WIB)
+# Ganti angka 8 dengan 7 jika kamu di Jakarta/WIB
+waktu_sekarang = datetime.utcnow() + timedelta(hours=8) 
 
-# ======================================================
-# PARSE WAKTU
-# ======================================================
+print(f"🕒 Waktu Run (WITA): {waktu_sekarang}")
+
+# Parse Waktu
 catatan["timestamp"] = pd.to_datetime(catatan["timestamp"], errors="coerce")
 
 if not mandi.empty and "waktu_mandi" in mandi.columns:
     mandi["waktu_mandi"] = pd.to_datetime(mandi["waktu_mandi"], errors="coerce")
 else:
-    # Jaga-jaga kalau tabel ada tapi kosong atau kolom salah
     mandi = pd.DataFrame(columns=["waktu_mandi"])
 
+# Ambil Data Cuaca Terkini
 bmkg_latest = None
 if not bmkg.empty:
     bmkg["datetime"] = pd.to_datetime(bmkg["datetime"], errors="coerce")
@@ -97,83 +86,66 @@ if not aqi.empty:
     aqi_latest = aqi.sort_values("datetime").iloc[-1]
 
 # ======================================================
-# 1️⃣ WINDOW AKTIVITAS
+# 1️⃣ LOGIKA WINDOW AKTIVITAS
 # ======================================================
-# Logic: Ambil waktu mandi PALING BARU (Max)
+# Cari kapan terakhir mandi
 if mandi.empty or mandi["waktu_mandi"].dropna().empty:
-    print("   ⚠️ Belum pernah mandi (data kosong), ambil aktivitas paling awal.")
+    print("⚠️ Belum pernah mandi, ambil aktivitas paling awal.")
     waktu_mandi_terakhir = catatan["timestamp"].min()
 else:
     waktu_mandi_terakhir = mandi["waktu_mandi"].max()
 
-# Handle jika masih NaT (Not a Time)
+# Handle NaT (Not a Time)
 if pd.isna(waktu_mandi_terakhir):
-    waktu_mandi_terakhir = datetime.now()
+    waktu_mandi_terakhir = waktu_sekarang
 
-print(f"🚿 Mandi terakhir terdeteksi: {waktu_mandi_terakhir}")
+print(f"🚿 Mandi terakhir: {waktu_mandi_terakhir}")
 
 # Filter aktivitas SETELAH mandi terakhir
 aktivitas_window = catatan[catatan["timestamp"] > waktu_mandi_terakhir]
-print(f"   Jumlah aktivitas baru: {len(aktivitas_window)}")
+print(f"📦 Jumlah aktivitas baru: {len(aktivitas_window)}")
 
 # ======================================================
-# 2️⃣ SKOR KEKOTORAN (FISIK)
+# 2️⃣ PERHITUNGAN SKOR
 # ======================================================
+# --- A. Skor Kekotoran (Fisik) ---
 if aktivitas_window.empty:
     skor_kekotoran_dasar = 0
 else:
     df_kotor = aktivitas_window.merge(master, on="id_aktivitas", how="left")
-    # Fillna untuk bobot jaga-jaga
     df_kotor["bobot_kotor"] = df_kotor["bobot_kotor"].fillna(0)
-    
-    df_kotor["skor_kotor"] = (
-        df_kotor["durasi_menit"] * df_kotor["bobot_kotor"]
-    )
+    # Rumus: Durasi * Bobot
+    df_kotor["skor_kotor"] = (df_kotor["durasi_menit"] * df_kotor["bobot_kotor"])
     skor_kekotoran_dasar = min(df_kotor["skor_kotor"].sum() / 100, 10)
 
-# faktor keringat (BMKG)
-if bmkg_latest is not None:
-    faktor_keringat = (
-        (bmkg_latest["temperature"] / 35) * 0.6
-        + (bmkg_latest["humidity"] / 100) * 0.4
-    )
-    faktor_keringat = max(0.5, min(faktor_keringat, 1.5))
-else:
-    faktor_keringat = 1
+# Faktor Keringat (Suhu & Lembap)
+temp_val = bmkg_latest["temperature"] if bmkg_latest is not None else 30
+humid_val = bmkg_latest["humidity"] if bmkg_latest is not None else 80
+
+faktor_keringat = ((temp_val / 35) * 0.6 + (humid_val / 100) * 0.4)
+faktor_keringat = max(0.5, min(faktor_keringat, 1.5))
 
 skor_kekotoran = round(skor_kekotoran_dasar * faktor_keringat, 2)
 
-# ======================================================
-# 3️⃣ SKOR BAU BADAN (MODEL TERPISAH)
-# ======================================================
-jam_sejak_mandi = (
-    (datetime.now() - waktu_mandi_terakhir).total_seconds() / 3600
-)
+# --- B. Skor Bau ---
+jam_sejak_mandi = (waktu_sekarang - waktu_mandi_terakhir).total_seconds() / 3600
 
-# Hitung jumlah aktivitas yang bikin bau
 if not aktivitas_window.empty:
     aktivitas_bau = aktivitas_window.merge(master, on="id_aktivitas", how="left")
     jumlah_aktivitas = len(aktivitas_bau)
 else:
     jumlah_aktivitas = 0
 
-faktor_lembap = bmkg_latest["humidity"] / 100 if bmkg_latest is not None else 0.5
-
-skor_bau = (
-    jam_sejak_mandi * 0.3
-    + jumlah_aktivitas * 0.5
-    + faktor_lembap * 2
-)
-
+faktor_lembap = humid_val / 100
+skor_bau = (jam_sejak_mandi * 0.3 + jumlah_aktivitas * 0.5 + faktor_lembap * 2)
 skor_bau = round(min(skor_bau, 10), 2)
 
-# ======================================================
-# 4️⃣ SKOR AQI
-# ======================================================
-skor_aqi = round(aqi_latest["aqi"] / 50, 2) if aqi_latest is not None else 0
+# --- C. Skor AQI ---
+aqi_val = aqi_latest["aqi"] if aqi_latest is not None else 0
+skor_aqi = round(aqi_val / 50, 2)
 
 # ======================================================
-# 5️⃣ PREFERENSI
+# 3️⃣ SKOR FINAL & KEPUTUSAN
 # ======================================================
 def get_pref(name, default):
     try:
@@ -187,14 +159,10 @@ bobot_bau_user = get_pref("bobot_bau", 0.3)
 bobot_aqi_user = get_pref("bobot_aqi", 0.3)
 threshold = get_pref("threshold_mandi", 6)
 
-# ======================================================
-# 6️⃣ SKOR FINAL
-# ======================================================
 skor_final = round(
-    skor_kekotoran * bobot_kotor_user
-    + skor_bau * bobot_bau_user
-    + skor_aqi * bobot_aqi_user,
-    2
+    skor_kekotoran * bobot_kotor_user +
+    skor_bau * bobot_bau_user +
+    skor_aqi * bobot_aqi_user, 2
 )
 
 if skor_final >= threshold:
@@ -205,19 +173,31 @@ else:
     rekomendasi = "TIDAK PERLU MANDI"
 
 # ======================================================
-# 7️⃣ SIMPAN KE CURATED
+# 4️⃣ SIMPAN KE CURATED (DELTA LAKE)
 # ======================================================
 hasil = pd.DataFrame([{
+    "generated_at": waktu_sekarang, # <--- Sudah WITA (UTC+8)
     "waktu_mandi_terakhir": waktu_mandi_terakhir,
     "skor_kekotoran": skor_kekotoran,
     "skor_bau": skor_bau,
     "skor_aqi": skor_aqi,
     "skor_final": skor_final,
     "rekomendasi": rekomendasi,
-    "generated_at": datetime.now()
+    # Data Konteks (Untuk Grafik)
+    "suhu_aktual": temp_val,
+    "kelembaban_aktual": humid_val,
+    "aqi_aktual": aqi_val
 }])
 
-write_csv(hasil, CURATED_BUCKET, "prescriptive/hasil_preskriptif.csv")
+path_curated = f"s3://{CURATED_BUCKET}/prescriptive/hasil_preskriptif"
+print(f"💾 Menyimpan ke Curated Delta: {path_curated}")
 
-print("✅ PRESCRIPTIVE FINAL BERHASIL")
-print(hasil)
+write_deltalake(
+    path_curated,
+    hasil,
+    mode="append", 
+    storage_options=storage_options
+)
+
+print("✅ PRESCRIPTIVE FINAL SELESAI")
+print(hasil.T)
