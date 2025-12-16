@@ -79,11 +79,10 @@ try:
     engine = create_engine(DATABASE_URL)
     
     # Simpan ke tabel 'aktivitas_setelah_mandi'
-    # if_exists='replace' -> Hapus tabel lama, buat baru (Full Refresh) agar tidak duplikat
     df.to_sql(
         "aktivitas_setelah_mandi",
         engine,
-        if_exists="replace",
+        if_exists="append",
         index=False
     )
     
