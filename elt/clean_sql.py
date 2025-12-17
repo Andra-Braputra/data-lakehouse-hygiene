@@ -34,7 +34,7 @@ def get_latest_csv(bucket, prefix):
     response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
     files = [obj for obj in response.get("Contents", []) if obj["Key"].endswith(".csv")]
     if not files:
-        raise FileNotFoundError("CSV SQL tidak ditemukan")
+        raise FileNotFoundError("SQL tidak ditemukan")
     return sorted(files, key=lambda x: x["LastModified"], reverse=True)[0]["Key"]
 
 # ===============================
