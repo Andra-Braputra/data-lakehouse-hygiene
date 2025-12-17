@@ -56,11 +56,10 @@ try:
     print("🔌 Connecting to Neon DB...")
     engine = create_engine(DATABASE_URL)
     
-    # REPLACE untuk refresh data dashboard
     df.to_sql(
         "hasil_preskriptif",
         engine,
-        if_exists="replace", 
+        if_exists="append", 
         index=False
     )
 
