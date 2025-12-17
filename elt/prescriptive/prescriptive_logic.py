@@ -4,23 +4,18 @@ from botocore.client import Config
 import io
 from datetime import datetime
 from deltalake import DeltaTable
+from deltalake.writer import write_deltalake
 import os
 
+# ======================================================
+# 1. KONFIGURASI & KONEKSI
+# ======================================================
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
-ACCESS_KEY = "minioadmin"
-SECRET_KEY = "minioadmin123"
+ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin123")
 
 CLEAN_BUCKET = "clean-zone"
 CURATED_BUCKET = "curated-zone"
-
-s3 = boto3.client(
-    "s3",
-    endpoint_url=MINIO_ENDPOINT,
-    aws_access_key_id=ACCESS_KEY,
-    aws_secret_access_key=SECRET_KEY,
-    config=Config(signature_version="s3v4"),
-    region_name="us-east-1"
-)
 
 storage_options = {
     "AWS_ACCESS_KEY_ID": ACCESS_KEY,
@@ -31,13 +26,8 @@ storage_options = {
     "AWS_ALLOW_HTTP": "true",
 }
 
-# ======================================================
-# HELPER FUNCTIONS
-# ======================================================
 def read_data_delta(bucket, path):
-    """Membaca folder Delta Table"""
     full_path = f"s3://{bucket}/{path}"
-    print(f"   📂 Membaca Delta: {full_path}")
     try:
         dt = DeltaTable(full_path, storage_options=storage_options)
         return dt.to_pandas()
@@ -45,163 +35,119 @@ def read_data_delta(bucket, path):
         print(f"   ⚠️ Gagal baca Delta '{path}': {e}")
         return pd.DataFrame()
 
-
 # ======================================================
-# LOAD CLEAN DATA (SEMUA DARI DELTA)
+# 2. LOAD CLEAN DATA (Tanpa Tabel Preferensi)
 # ======================================================
-print("--- LOAD DATA ---")
+print("\n--- [START] LOAD CLEAN DATA ---")
 
-# 1. Load Sheets
-try:
-    catatan = read_data_delta(CLEAN_BUCKET, "sheets/catatan_aktivitas")
-    master = read_data_delta(CLEAN_BUCKET, "sheets/master_aktivitas")
-    preferensi = read_data_delta(CLEAN_BUCKET, "sheets/preferensi")
-except Exception as e:
-    print(f"❌ Error fatal membaca data utama: {e}")
-    raise e
-
-# 2. Load Data Pendukung (Log Mandi, BMKG, AQI)
-mandi = read_data_delta(CLEAN_BUCKET, "sql/log_mandi")
+catatan = read_data_delta(CLEAN_BUCKET, "sheets/catatan_aktivitas")
+master = read_data_delta(CLEAN_BUCKET, "sql/aktivitas_joined_master")
+mandi = read_data_delta(CLEAN_BUCKET, "sheets/log_mandi")
 bmkg = read_data_delta(CLEAN_BUCKET, "api/bmkg")
 aqi = read_data_delta(CLEAN_BUCKET, "api/aqi")
 
-# ======================================================
-# PARSE WAKTU
-# ======================================================
 catatan["timestamp"] = pd.to_datetime(catatan["timestamp"], errors="coerce")
+if not mandi.empty:
+    mandi["timestamp"] = pd.to_datetime(mandi["timestamp"], errors="coerce")
 
-if not mandi.empty and "waktu_mandi" in mandi.columns:
-    mandi["waktu_mandi"] = pd.to_datetime(mandi["waktu_mandi"], errors="coerce")
-else:
-    mandi = pd.DataFrame(columns=["waktu_mandi"])
-
-bmkg_latest = None
-if not bmkg.empty:
-    bmkg["datetime"] = pd.to_datetime(bmkg["datetime"], errors="coerce")
-    bmkg_latest = bmkg.sort_values("datetime").iloc[-1]
-
-aqi_latest = None
-if not aqi.empty:
-    aqi["datetime"] = pd.to_datetime(aqi["datetime"], errors="coerce")
-    aqi_latest = aqi.sort_values("datetime").iloc[-1]
+bmkg_latest = bmkg.sort_values("datetime").iloc[-1] if not bmkg.empty else None
+aqi_latest = aqi.sort_values("datetime").iloc[-1] if not aqi.empty else None
 
 # ======================================================
-# 1️⃣ WINDOW AKTIVITAS
+# 3. WINDOW AKTIVITAS
 # ======================================================
-
-if mandi.empty or mandi["waktu_mandi"].dropna().empty:
-    print("   ⚠️ Belum pernah mandi (data kosong), ambil aktivitas paling awal.")
-    waktu_mandi_terakhir = catatan["timestamp"].min()
-else:
-    waktu_mandi_terakhir = mandi["waktu_mandi"].max()
-
-if pd.isna(waktu_mandi_terakhir):
+waktu_mandi_terakhir = mandi["timestamp"].max() if not mandi.empty else catatan["timestamp"].min()
+if pd.isna(waktu_mandi_terakhir): 
     waktu_mandi_terakhir = datetime.now()
 
-print(f"🚿 Mandi terakhir terdeteksi: {waktu_mandi_terakhir}")
-
-aktivitas_window = catatan[catatan["timestamp"] > waktu_mandi_terakhir]
-print(f"   Jumlah aktivitas baru: {len(aktivitas_window)}")
+print(f"🚿 Mandi terakhir: {waktu_mandi_terakhir}")
+aktivitas_window = catatan[catatan["timestamp"] > waktu_mandi_terakhir].copy()
 
 # ======================================================
-# 2️⃣ SKOR KEKOTORAN (FISIK)
+# 4. SKOR KEKOTORAN (Indoor & Outdoor)
 # ======================================================
-if aktivitas_window.empty:
-    skor_kekotoran_dasar = 0
-else:
+skor_kekotoran = 0
+if not aktivitas_window.empty and not master.empty:
     df_kotor = aktivitas_window.merge(master, on="id_aktivitas", how="left")
-
-    df_kotor["bobot_kotor"] = df_kotor["bobot_kotor"].fillna(0)
     
-    df_kotor["skor_kotor"] = (
-        df_kotor["durasi_menit"] * df_kotor["bobot_kotor"]
-    )
-    skor_kekotoran_dasar = min(df_kotor["skor_kotor"].sum() / 100, 10)
+    temp_factor = (bmkg_latest["temperature"] / 25) if bmkg_latest is not None else 1.0
+    aqi_factor = (aqi_latest["aqi"] / 50) if aqi_latest is not None else 1.0
+    faktor_outdoor = max(1.0, (temp_factor * 0.6) + (aqi_factor * 0.4))
 
-# faktor keringat 
-if bmkg_latest is not None:
-    faktor_keringat = (
-        (bmkg_latest["temperature"] / 35) * 0.6
-        + (bmkg_latest["humidity"] / 100) * 0.4
-    )
-    faktor_keringat = max(0.5, min(faktor_keringat, 1.5))
-else:
-    faktor_keringat = 1
+    def hitung_per_baris(row):
+        base = row["durasi_menit"] * (row["skor_met"] / 10)
+        kategori = str(row.get("nama_kategori", "")).lower()
+        return base * faktor_outdoor if "outdoor" in kategori else base
 
-skor_kekotoran = round(skor_kekotoran_dasar * faktor_keringat, 2)
+    df_kotor["skor_individu"] = df_kotor.apply(hitung_per_baris, axis=1)
+    skor_kekotoran = round(min(df_kotor["skor_individu"].sum() / 15, 10), 2)
 
 # ======================================================
-# 3️⃣ SKOR BAU BADAN 
+# 5. SKOR BAU OTOMATIS
 # ======================================================
-jam_sejak_mandi = (
-    (datetime.now() - waktu_mandi_terakhir).total_seconds() / 3600
-)
-
-if not aktivitas_window.empty:
-    aktivitas_bau = aktivitas_window.merge(master, on="id_aktivitas", how="left")
-    jumlah_aktivitas = len(aktivitas_bau)
-else:
-    jumlah_aktivitas = 0
-
-faktor_lembap = bmkg_latest["humidity"] / 100 if bmkg_latest is not None else 0.5
-
-skor_bau = (
-    jam_sejak_mandi * 0.3
-    + jumlah_aktivitas * 0.5
-    + faktor_lembap * 2
-)
-
-skor_bau = round(min(skor_bau, 10), 2)
+jam_sejak_mandi = (datetime.now() - waktu_mandi_terakhir).total_seconds() / 3600
+skor_waktu = jam_sejak_mandi * 0.2
+total_menit = aktivitas_window["durasi_menit"].sum() if not aktivitas_window.empty else 0
+skor_aktivitas = total_menit * 0.05
+kelembapan = (bmkg_latest["humidity"] / 100) if bmkg_latest is not None else 0.5
+skor_bau = round(min(skor_waktu + skor_aktivitas + (kelembapan * 2), 10), 2)
 
 # ======================================================
-# 4️⃣ SKOR AQI
+# 6. SKOR AQI
 # ======================================================
-skor_aqi = round(aqi_latest["aqi"] / 50, 2) if aqi_latest is not None else 0
+skor_aqi = round(min(aqi_latest["aqi"] / 50, 10), 2) if aqi_latest is not None else 0
 
 # ======================================================
-# 5️⃣ PREFERENSI
+# 7. FINAL REKOMENDASI (HARDCODED PREFERENCES)
 # ======================================================
-def get_pref(name, default):
-    try:
-        row = preferensi.loc[preferensi["parameter"] == name, "nilai"]
-        return float(row.iloc[0]) if not row.empty else default
-    except:
-        return default
+# Nilai preferensi sekarang di-hardcode di sini
+B_KOTOR = 0.4
+B_BAU = 0.4
+B_AQI = 0.2
+THRESHOLD = 6.5
 
-bobot_kotor_user = get_pref("bobot_kotor", 0.4)
-bobot_bau_user = get_pref("bobot_bau", 0.3)
-bobot_aqi_user = get_pref("bobot_aqi", 0.3)
-threshold = get_pref("threshold_mandi", 6)
+skor_final = round((skor_kekotoran * B_KOTOR) + (skor_bau * B_BAU) + (skor_aqi * B_AQI), 2)
 
-# ======================================================
-# 6️⃣ SKOR FINAL
-# ======================================================
-skor_final = round(
-    skor_kekotoran * bobot_kotor_user
-    + skor_bau * bobot_bau_user
-    + skor_aqi * bobot_aqi_user,
-    2
-)
-
-if skor_final >= threshold:
-    rekomendasi = "SEGERA MANDI"
-elif skor_final >= threshold - 2:
+# Logika Rekomendasi yang lebih masuk akal
+if skor_final >= THRESHOLD:
+    rekomendasi = "WAJIB MANDI SEKARANG"
+    penjelasan = "Skor kebersihan kritis. Tubuh sudah sangat kotor dan berbau."
+elif skor_final >= THRESHOLD - 1.0:
+    rekomendasi = "SANGAT DISARANKAN"
+    penjelasan = "Kondisi mulai tidak nyaman. Disarankan segera bilas tubuh."
+elif skor_final >= THRESHOLD - 2.5:
     rekomendasi = "MANDI BISA DITUNDA"
+    penjelasan = "Kondisi masih oke, tapi perhatikan akumulasi aktivitas."
 else:
-    rekomendasi = "TIDAK PERLU MANDI"
+    rekomendasi = "MASIH SEGAR"
+    penjelasan = "Tubuh dalam kondisi prima. Tetap pertahankan higinitas."
+
+# Safety Catch untuk parameter ekstrem
+if skor_bau >= 9.0:
+    rekomendasi = "WAJIB MANDI (Faktor Bau)"
+    penjelasan = "Meskipun skor rata-rata aman, bau badan sudah mencapai ambang batas."
 
 # ======================================================
-# 7️⃣ SIMPAN KE CURATED
+# 8. SIMPAN KE CURATED ZONE
 # ======================================================
-hasil = pd.DataFrame([{
+hasil_df = pd.DataFrame([{
     "waktu_mandi_terakhir": waktu_mandi_terakhir,
+    "jam_sejak_mandi": round(jam_sejak_mandi, 1),
     "skor_kekotoran": skor_kekotoran,
     "skor_bau": skor_bau,
     "skor_aqi": skor_aqi,
     "skor_final": skor_final,
     "rekomendasi": rekomendasi,
+    "penjelasan": penjelasan,
     "generated_at": datetime.now()
 }])
 
-print("✅ PRESCRIPTIVE FINAL BERHASIL")
-print(hasil)
+write_deltalake(
+    f"s3://{CURATED_BUCKET}/prescriptive_hygiene",
+    hasil_df,
+    mode="overwrite",
+    schema_mode="overwrite",
+    storage_options=storage_options
+)
+
+print(f"✅ PROSES SELESAI: {rekomendasi} (Skor: {skor_final})")

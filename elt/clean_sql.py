@@ -74,7 +74,7 @@ try:
     # ======================================================
     # SIMPAN KE CLEAN-ZONE (DELTA LAKE)
     # ======================================================
-    path = f"s3://{CLEAN_BUCKET}/aktivitas_joined_master"
+    path = f"s3://{CLEAN_BUCKET}/sql/aktivitas_joined_master"
     print(f"💾 Menyimpan Tabel Gabungan ke Delta: {path}")
 
     write_deltalake(

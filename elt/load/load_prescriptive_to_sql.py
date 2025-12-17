@@ -2,19 +2,22 @@ import pandas as pd
 from sqlalchemy import create_engine
 from deltalake import DeltaTable
 import os
+import sys
 
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
-ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin123")
-CURATED_BUCKET = "curated-zone"
-
-# Database URL Neon
+# ======================================================
+# KONFIGURASI
+# ======================================================
+# Menggunakan default URL agar tidak bernilai None jika env var tidak ada
 DATABASE_URL = os.getenv(
     "DATABASE_URL", 
     "postgresql://neondb_owner:npg_B7ysWvCoLix2@ep-still-surf-ad9wrml7-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require"
 )
 
-# Config Delta
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
+ACCESS_KEY = "minioadmin"
+SECRET_KEY = "minioadmin123"
+CURATED_BUCKET = "curated-zone"
+
 storage_options = {
     "AWS_ACCESS_KEY_ID": ACCESS_KEY,
     "AWS_SECRET_ACCESS_KEY": SECRET_KEY,
@@ -25,47 +28,37 @@ storage_options = {
 }
 
 # ======================================================
-# LOAD DATA DARI CURATED 
+# LOADING HASIL PRESKRIPTIF KE TABEL BARU
 # ======================================================
-print("--- LOAD PRESCRIPTIVE TO SQL ---")
-
 try:
-    path = f"s3://{CURATED_BUCKET}/prescriptive/hasil_preskriptif"
-    print(f"📂 Membaca Delta Table: {path}")
+    print("🚀 Memuat hasil rekomendasi terbaru ke Neon...")
+
+    # Path sumber data di Curated Zone
+    path_curated = f"s3://{CURATED_BUCKET}/prescriptive_hygiene"
     
-    # Baca Delta Table langsung jadi Pandas DataFrame
-    dt = DeltaTable(path, storage_options=storage_options)
-    df = dt.to_pandas()
-    
-    if df.empty:
-        print("⚠️ Data Curated kosong, skip loading.")
-        exit(0)
+    dt = DeltaTable(path_curated, storage_options=storage_options)
+    df_hasil = dt.to_pandas()
 
-    # Pastikan kolom waktu dikenali Pandas
-    df["generated_at"] = pd.to_datetime(df["generated_at"])
+    if not df_hasil.empty:
+        # Pastikan kolom waktu valid
+        if "generated_at" in df_hasil.columns:
+            df_hasil["generated_at"] = pd.to_datetime(df_hasil["generated_at"])
 
-    print(f"📊 Data ditemukan: {len(df)} baris")
-    print(df.tail(3))
-
-    # ======================================================
-    # LOAD KE NEON DB
-    # ======================================================
-    print("🔌 Connecting to Neon DB...")
-    engine = create_engine(DATABASE_URL)
-    
-    df.to_sql(
-        "hasil_preskriptif",
-        engine,
-        if_exists="append", 
-        index=False
-    )
-
-    print("✅ SUKSES: Data Prescriptive berhasil dimuat ke Neon")
+        engine = create_engine(DATABASE_URL)
+        
+        # Nama tabel baru: rekomendasi_mandi_preskriptif
+        # Menggunakan 'append' agar histori skor tersimpan terus ke bawah
+        df_hasil.to_sql(
+            "rekomendasi_mandi_preskriptif", 
+            engine, 
+            if_exists="append", 
+            index=False
+        )
+        print("✅ Berhasil: Data dimuat ke tabel [rekomendasi_mandi_preskriptif].")
+    else:
+        print("⚠️ Data di Curated Zone kosong.")
 
 except Exception as e:
-    print(f"❌ Error Load Prescriptive: {e}")
-    # Handle jika table belum ada (first run)
-    if "Not a Delta Table" in str(e):
-        print("⚠️ Delta Table belum terbentuk (Run Pertama), abaikan.")
-    else:
-        raise e
+    print(f"❌ Gagal memuat rekomendasi: {e}")
+    # Penting: raise e agar run_pipeline.py bisa menangkap error ini
+    raise e
