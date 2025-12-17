@@ -3,9 +3,6 @@ from sqlalchemy import create_engine
 from deltalake import DeltaTable
 import os
 
-# ======================================================
-# CONFIG ENV
-# ======================================================
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
 ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin123")
@@ -28,7 +25,7 @@ storage_options = {
 }
 
 # ======================================================
-# LOAD DATA DARI CURATED (DELTA LAKE)
+# LOAD DATA DARI CURATED 
 # ======================================================
 print("--- LOAD PRESCRIPTIVE TO SQL ---")
 

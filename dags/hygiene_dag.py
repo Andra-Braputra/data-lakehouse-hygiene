@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 default_args = {
     'owner': 'andra',
-    'retries': 2,
+    'retries': 0,
     'start_date': datetime(2023, 1, 1),
 }
 

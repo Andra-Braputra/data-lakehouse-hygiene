@@ -10,19 +10,16 @@ import os
 # ======================================================
 # GOOGLE SHEETS
 # ======================================================
-# Gunakan env var kalau ada, kalau tidak ada pakai ID default
 SHEET_ID = os.getenv("SHEET_ID", "1rzafmIPkUhwoWoa8C2sygm6ch86K53N-zPIgXaPV_wo")
 
 URLS = {
-    "catatan_aktivitas": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=aktivitas_manual",
-    "master_aktivitas": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=master_aktivitas",
-    "preferensi": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=preferensi",
-}
+    "aktivitas_manual": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=aktivitas_manual",
+    "log_mandi": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=log_mandi",
+    }
 
 # ======================================================
 # MINIO (SMART CONFIG)
 # ======================================================
-# Otomatis deteksi: Jalan di Airflow (minio) atau Laptop (localhost)
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
 ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin123")
@@ -86,7 +83,6 @@ for name, url in URLS.items():
         filename = f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         key = f"sheets/{name}/{filename}"
 
-        # --- UPDATE: Pakai Buffer (Memory) ---
         csv_buffer = io.StringIO()
         df.to_csv(csv_buffer, index=False)
         

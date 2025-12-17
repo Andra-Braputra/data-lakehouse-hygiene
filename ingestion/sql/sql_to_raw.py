@@ -6,9 +6,6 @@ from datetime import datetime
 import io
 import os
 
-# ======================================================
-# DB & MINIO DARI ENV (SUPPORT DOCKER)
-# ======================================================
 DATABASE_URL = os.getenv(
     "DATABASE_URL", 
     "postgresql://neondb_owner:npg_B7ysWvCoLix2@ep-still-surf-ad9wrml7-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require"
@@ -18,49 +15,47 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
 ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin123")
 
-try:
-    engine = create_engine(DATABASE_URL)
+target_tables = ["aktivitas", "kategori"]
 
-    # ======================================================
-    # AMBIL DATA
-    # ======================================================
-    query = """
-    SELECT
-        waktu_mandi,
-        tingkat_bau_badan
-    FROM log_mandi
-    ORDER BY waktu_mandi
-    """
-    df = pd.read_sql(query, engine)
+engine = create_engine(DATABASE_URL)
+s3 = boto3.client(
+    "s3",
+    endpoint_url=MINIO_ENDPOINT,
+    aws_access_key_id=ACCESS_KEY,
+    aws_secret_access_key=SECRET_KEY,
+    config=Config(signature_version="s3v4"),
+    region_name="us-east-1"
+)
 
-    # ======================================================
-    # UPLOAD
-    # ======================================================
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=MINIO_ENDPOINT,
-        aws_access_key_id=ACCESS_KEY,
-        aws_secret_access_key=SECRET_KEY,
-        config=Config(signature_version="s3v4"),
-        region_name="us-east-1"
-    )
+print(f"🚀 Memulai proses ingest pada {datetime.now()}...")
 
-    buffer = io.StringIO()
-    df.to_csv(buffer, index=False)
+for name in target_tables:
+    try:
+        print(f"⏳ Mengambil data dari tabel: [Aktivitas].[{name}]...")
 
-    object_key = (
-        f"sql/log_mandi/"
-        f"log_mandi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    )
+        query = f'SELECT * FROM "Aktivitas"."{name}"'
+        df = pd.read_sql(query, engine)
 
-    s3.put_object(
-        Bucket="raw-zone",
-        Key=object_key,
-        Body=buffer.getvalue()
-    )
+        if df.empty:
+            print(f"⚠️ Tabel {name} kosong, melewati proses upload.")
+            continue
 
-    print(f"[RAW SQL] berhasil disimpan → {object_key}")
+        csv_buffer = io.BytesIO()
+        df.to_csv(csv_buffer, index=False, encoding='utf-8')
+        csv_buffer.seek(0)
 
-except Exception as e:
-    print(f"❌ Error SQL Ingest: {e}")
-    raise e
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        object_key = f"sql/{name}/{name}_{timestamp}.csv"
+
+        s3.put_object(
+            Bucket="raw-zone",
+            Key=object_key,
+            Body=csv_buffer
+        )
+
+        print(f"✅ Berhasil: {name} → {object_key}")
+
+    except Exception as e:
+        print(f"❌ Gagal memproses tabel {name}: {e}")
+
+print(f"🏁 Semua proses selesai pada {datetime.now()}.")
