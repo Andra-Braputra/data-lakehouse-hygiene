@@ -48,6 +48,8 @@ print(f"[RAW] log_mandi pakai → {key}")
 obj = s3.get_object(Bucket=RAW_BUCKET, Key=key)
 df = pd.read_csv(io.BytesIO(obj["Body"].read()))
 
+df['waktu_mandi'] = pd.to_datetime(df['waktu_mandi'], errors='coerce')
+
 print("[CHECK] Kolom log_mandi:", list(df.columns))
 
 # ======================================================
