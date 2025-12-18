@@ -1,5 +1,6 @@
 version: "3.9"
 
+# Template konfigurasi biar gak ngetik ulang
 x-airflow-common: &airflow-common
   build:
     context: ..
@@ -9,9 +10,13 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+
+    # --- ENV KHUSUS PROYEK KAMU (HARDCODED) ---
+    # Ganti localhost jadi 'minio' karena jalan di dalam network docker
     MINIO_ENDPOINT: "http://minio:9000"
     MINIO_ACCESS_KEY: "minioadmin"
     MINIO_SECRET_KEY: "minioadmin123"
+    # URL Database Neon kamu
     DATABASE_URL: "postgresql://neondb_owner:npg_B7ysWvCoLix2@ep-still-surf-ad9wrml7-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require"
 
   volumes:
@@ -26,6 +31,7 @@ x-airflow-common: &airflow-common
       condition: service_healthy
 
 services:
+  # === DATABASE AIRFLOW (Internal) ===
   postgres:
     image: postgres:13
     environment:
@@ -37,6 +43,7 @@ services:
       interval: 5s
       retries: 5
 
+  # === AIRFLOW WEBSERVER (UI) ===
   airflow-webserver:
     <<: *airflow-common
     command: webserver
@@ -52,6 +59,7 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  # === AIRFLOW SCHEDULER (Otak) ===
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
@@ -60,6 +68,7 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  # === AIRFLOW INIT (Setup Awal) ===
   airflow-init:
     <<: *airflow-common
     command: version
@@ -70,6 +79,7 @@ services:
       _AIRFLOW_WWW_USER_USERNAME: "admin"
       _AIRFLOW_WWW_USER_PASSWORD: "admin"
 
+  # === MINIO ===
   minio:
     image: minio/minio
     container_name: minio
@@ -88,6 +98,7 @@ services:
       timeout: 5s
       retries: 5
 
+  # === AUTO CREATE BUCKETS ===
   createbuckets:
     image: minio/mc
     depends_on:
@@ -102,14 +113,34 @@ services:
       exit 0;
       "
 
+  # === METABASE ===
+  metabase-db:
+    image: postgres:15
+    container_name: metabase-db
+    environment:
+      POSTGRES_DB: metabase
+      POSTGRES_USER: metabase
+      POSTGRES_PASSWORD: metabase
+    volumes:
+      - metabase_db:/var/lib/postgresql/data
+    restart: unless-stopped
+
   metabase:
     image: metabase/metabase:latest
     container_name: metabase
     ports:
       - "3000:3000"
     depends_on:
-      - minio
+      - metabase-db
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabase
+      MB_DB_PORT: 5432
+      MB_DB_USER: metabase
+      MB_DB_PASS: metabase
+      MB_DB_HOST: metabase-db
     restart: unless-stopped
 
 volumes:
   minio_data:
+  metabase_db:

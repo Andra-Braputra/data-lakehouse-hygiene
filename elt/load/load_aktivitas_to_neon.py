@@ -81,7 +81,7 @@ try:
     df_final.to_sql(
         "riwayat_aktivitas_dashboard",
         engine,
-        if_exists="append",
+        if_exists="repclace",
         index=False
     )
     

@@ -68,6 +68,11 @@ with DAG(
         bash_command='python /opt/airflow/elt/load/load_aktivitas_to_neon.py'
     )
 
+    load_riwayat_mandi = BashOperator(
+        task_id='load_riwayat_mandi_to_neon',
+        bash_command='python /opt/airflow/elt/load/load_riwayat_mandi_to_neon.py'
+    )
+
     load_result = BashOperator(
         task_id='load_result_to_neon',
         bash_command='python /opt/airflow/elt/load/load_prescriptive_to_sql.py'
@@ -81,4 +86,4 @@ with DAG(
 
     [clean_sheets, clean_bmkg, clean_aqi, clean_sql] >> prescriptive_logic
 
-    prescriptive_logic >> [load_activity, load_result]
+    prescriptive_logic >> [load_activity, load_riwayat_mandi, load_result]
