@@ -5,11 +5,10 @@ from botocore.client import Config
 import io
 import os
 from deltalake.writer import write_deltalake
-from datetime import datetime
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
-ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin123")
+ACCESS_KEY = "minioadmin"
+SECRET_KEY = "minioadmin123"
 
 RAW_BUCKET = "raw-zone"
 CLEAN_BUCKET = "clean-zone"
@@ -32,41 +31,24 @@ storage_options = {
     "AWS_ALLOW_HTTP": "true",
 }
 
-def find_latest_by_metadata(bucket, prefix, meta_key, meta_value):
-    """Mencari file terbaru berdasarkan metadata 'waktu_ingest'"""
+def get_latest_json(bucket, prefix):
     response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
     if "Contents" not in response:
-        return None
+        raise FileNotFoundError(f"Tidak ada file di {prefix}")
 
-    valid_files = []
-    for obj in response["Contents"]:
-        head = s3.head_object(Bucket=bucket, Key=obj["Key"])
-        metadata = head.get("Metadata", {})
-        
-        # Cek apakah kategori/nama sesuai (Boto3 mengembalikan key dalam lowercase)
-        if metadata.get(meta_key.lower()) == meta_value:
-            waktu_str = metadata.get("waktu_ingest")
-            if waktu_str:
-                valid_files.append({
-                    "key": obj["Key"],
-                    "waktu": datetime.strptime(waktu_str, '%Y-%m-%d %H:%M:%S')
-                })
-    
-    if not valid_files:
-        return None
-    
-    # Sort berdasarkan waktu_ingest terbaru
-    latest = sorted(valid_files, key=lambda x: x["waktu"], reverse=True)[0]
-    return latest["key"]
+    files = [obj for obj in response["Contents"] if obj["Key"].endswith(".json")]
+    if not files:
+        raise FileNotFoundError(f"Tidak ada JSON di {prefix}")
 
+    latest = sorted(files, key=lambda x: x["LastModified"], reverse=True)[0]
+    return latest["Key"]
+
+# ===============================
+# AMBIL RAW TERBARU
+# ===============================
 try:
-    # Mengambil file berdasarkan metadata
-    aqi_key = find_latest_by_metadata(RAW_BUCKET, "api/aqicn/", "nama_data", "aqicn_air_quality")
-    
-    if not aqi_key:
-        raise FileNotFoundError("File AQICN dengan metadata yang sesuai tidak ditemukan")
-
-    print(f"[CLEAN AQICN] Memproses data terbaru: {aqi_key}")
+    aqi_key = get_latest_json(RAW_BUCKET, "api/aqicn/")
+    print(f"[RAW AQICN] pakai → {aqi_key}")
 
     obj = s3.get_object(Bucket=RAW_BUCKET, Key=aqi_key)
     raw = json.loads(obj["Body"].read())
@@ -76,6 +58,9 @@ try:
 
     data = raw.get("data", {})
 
+    # ===============================
+    # NORMALISASI
+    # ===============================
     df = pd.DataFrame([{
         "datetime": data.get("time", {}).get("s"),
         "aqi": data.get("aqi"),
@@ -86,8 +71,18 @@ try:
 
     df["datetime"] = pd.to_datetime(df["datetime"])
 
+    # ===============================
+    # SIMPAN CLEAN (DELTA)
+    # ===============================
     path = f"s3://{CLEAN_BUCKET}/api/aqi"
-    write_deltalake(path, df, mode="overwrite", storage_options=storage_options)
+    print(f"   💾 Menyimpan Delta: {path}")
+    
+    write_deltalake(
+        path,
+        df,
+        mode="overwrite", 
+        storage_options=storage_options
+    )
     print("✅ CLEAN AQICN SELESAI")
 
 except Exception as e:
