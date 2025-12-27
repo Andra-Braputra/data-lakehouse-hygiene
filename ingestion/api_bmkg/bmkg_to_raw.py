@@ -5,20 +5,13 @@ from datetime import datetime
 import json
 import os
 
-# URL BMKG
 BMKG_URL = "https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=63.03.02.1001"
 
-# ==========================================
-# KONFIGURASI DINAMIS (PENTING!)
-# ==========================================
-# Jika di Airflow (Docker), dia akan pakai 'http://minio:9000'
-# Jika di Laptop (Manual), dia pakai 'http://localhost:9000'
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
 ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin123")
 RAW_BUCKET = "raw-zone"
 
-# Setup Client S3
 s3 = boto3.client(
     "s3",
     endpoint_url=MINIO_ENDPOINT,
@@ -38,27 +31,27 @@ print(f"  Target MinIO: {MINIO_ENDPOINT}")
 print("==============================")
 
 try:
-    # 1. Request ke API BMKG
-    print(f"🌍 Fetching data dari: {BMKG_URL}")
     resp = requests.get(BMKG_URL, headers=headers, timeout=30)
-    resp.raise_for_status() # Error kalau status bukan 200 OK
-    
+    resp.raise_for_status()
     data = resp.json()
 
-    # 2. Siapkan Key
-    filename = f"bmkg_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    key = f"api/bmkg/{filename}"
+    # Path bersih: api/bmkg/bmkg.json
+    key = "api/bmkg/bmkg.json"
 
-    # 3. Upload ke MinIO
     s3.put_object(
         Bucket=RAW_BUCKET,
         Key=key,
-        Body=json.dumps(data, indent=2)
+        Body=json.dumps(data, indent=2),
+        Metadata={
+            "kategori_sumber": "api_bmkg",
+            "format_file": "json",
+            "nama_data": "prakiraan_cuaca",
+            "waktu_ingest": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
     )
 
     print(f"✅ [RAW BMKG] Berhasil upload → {key}")
 
 except Exception as e:
     print(f"❌ GAGAL Ingest BMKG: {e}")
-    # Raise error supaya Airflow sadar ini gagal (jadi Merah)
     raise e

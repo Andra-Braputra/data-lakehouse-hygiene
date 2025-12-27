@@ -27,35 +27,36 @@ s3 = boto3.client(
     region_name="us-east-1"
 )
 
-print(f"🚀 Memulai proses ingest pada {datetime.now()}...")
+print(f"Memulai proses ingest pada {datetime.now()}...")
+
 
 for name in target_tables:
     try:
-        print(f"⏳ Mengambil data dari tabel: [Aktivitas].[{name}]...")
-
         query = f'SELECT * FROM "Aktivitas"."{name}"'
         df = pd.read_sql(query, engine)
 
-        if df.empty:
-            print(f"⚠️ Tabel {name} kosong, melewati proses upload.")
-            continue
+        if df.empty: continue
+
+        # Path bersih: sql/nama_tabel/nama_tabel.csv
+        object_key = f"sql/{name}/{name}.csv"
 
         csv_buffer = io.BytesIO()
         df.to_csv(csv_buffer, index=False, encoding='utf-8')
         csv_buffer.seek(0)
 
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        object_key = f"sql/{name}/{name}_{timestamp}.csv"
-
         s3.put_object(
             Bucket="raw-zone",
             Key=object_key,
-            Body=csv_buffer
+            Body=csv_buffer,
+            Metadata={
+                "kategori_sumber": "sql_database",
+                "format_file": "csv",
+                "nama_tabel": name,
+                "waktu_ingest": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
         )
-
-        print(f"✅ Berhasil: {name} → {object_key}")
-
+        print(f"✅ Berhasil: {name} → {object_key} (Metadata updated)")
     except Exception as e:
         print(f"❌ Gagal memproses tabel {name}: {e}")
 
-print(f"🏁 Semua proses selesai pada {datetime.now()}.")
+print(f"Semua proses selesai pada {datetime.now()}.")

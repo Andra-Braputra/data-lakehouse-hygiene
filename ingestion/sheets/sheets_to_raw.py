@@ -78,10 +78,8 @@ print("==============================")
 for name, url in URLS.items():
     try:
         df = read_sheet_csv(url)
-        print(f"[CHECK] {name} columns → {list(df.columns)}")
-
-        filename = f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        key = f"sheets/{name}/{filename}"
+        # Path bersih: sheets/nama_sheet/nama_sheet.csv
+        key = f"sheets/{name}/{name}.csv"
 
         csv_buffer = io.StringIO()
         df.to_csv(csv_buffer, index=False)
@@ -89,16 +87,16 @@ for name, url in URLS.items():
         s3.put_object(
             Bucket=RAW_BUCKET,
             Key=key,
-            Body=csv_buffer.getvalue()
+            Body=csv_buffer.getvalue(),
+            Metadata={
+                "kategori_sumber": "google_sheets",
+                "format_file": "csv",
+                "nama_sheet": name,
+                "waktu_ingest": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
         )
-        # -------------------------------------
-
-        print(f"[RAW] {name} → {key}")
-
+        print(f"[RAW] {name} → {key} (Metadata updated)")
     except Exception as e:
         print(f"❌ Gagal ingest {name}: {e}")
-        # Jangan raise error dulu biar sheet lain tetap dicoba
-        # Tapi kalau mau strict (gagal satu gagal semua), uncomment baris bawah:
-        # raise e
 
 print("✅ INGESTION SHEETS SELESAI")

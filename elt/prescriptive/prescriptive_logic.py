@@ -40,7 +40,6 @@ def read_data_delta(bucket, path):
     full_path = f"s3://{bucket}/{path}"
     try:
         dt = DeltaTable(full_path, storage_options=storage_options)
-        # Menghapus timezone (tz-naive) agar sinkron dengan jam lokal
         df = dt.to_pandas()
         for col in df.select_dtypes(include=['datetime64[ns, UTC]', 'datetimetz']).columns:
             df[col] = df[col].dt.tz_localize(None)
@@ -54,8 +53,6 @@ def read_data_delta(bucket, path):
 # ======================================================
 print("\n--- [START] LOAD CLEAN DATA ---")
 
-# Menggunakan jam lokal (WITA = UTC+8). 
-# Jika datetime.now() kamu masih jam 10, kita paksa tambah 8 jam.
 waktu_sekarang = datetime.utcnow() + timedelta(hours=8)
 
 catatan = read_data_delta(CLEAN_BUCKET, "sheets/catatan_aktivitas")
@@ -64,7 +61,6 @@ mandi = read_data_delta(CLEAN_BUCKET, "sheets/log_mandi")
 bmkg = read_data_delta(CLEAN_BUCKET, "api/bmkg")
 aqi = read_data_delta(CLEAN_BUCKET, "api/aqi")
 
-# Pastikan semua kolom timestamp bersifat naive (tanpa TZ) agar tidak minus saat dikurangi
 for df in [catatan, mandi]:
     if not df.empty and "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
@@ -80,7 +76,6 @@ waktu_mandi_terakhir = mandi["timestamp"].max() if not mandi.empty else catatan[
 if pd.isna(waktu_mandi_terakhir): 
     waktu_mandi_terakhir = waktu_sekarang - timedelta(hours=6)
 
-# Mencegah nilai minus jika data log mandi 'lebih depan' dari jam sistem
 if waktu_mandi_terakhir > waktu_sekarang:
     waktu_mandi_terakhir = waktu_sekarang
 
