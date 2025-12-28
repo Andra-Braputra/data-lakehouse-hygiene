@@ -4,22 +4,21 @@ from datetime import datetime, timedelta
 
 default_args = {
     'owner': 'andra',
-    'retries': 0,
-    'start_date': datetime(2023, 1, 1),
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+    'start_date': datetime(2025, 1, 1), # Sesuaikan ke tahun berjalan
 }
 
+# ======================================================
+# DAG 1: API PIPELINE (Setiap 6 Jam)
+# ======================================================
 with DAG(
-    dag_id='hygiene_lakehouse_pipeline',
+    dag_id='hygiene_api_pipeline',
     default_args=default_args,
-    schedule_interval=None, 
-    catchup=False
-) as dag:
-
-    # --- GROUP 1: INGESTION ---
-    ingest_sheets = BashOperator(
-        task_id='ingest_sheets',
-        bash_command='python /opt/airflow/ingestion/sheets/sheets_to_raw.py'
-    )
+    schedule_interval='0 */6 * * *', # Menit 0, setiap jam ke-0, 6, 12, 18
+    catchup=False,
+    tags=['6-hourly', 'api']
+) as dag_api:
 
     ingest_bmkg = BashOperator(
         task_id='ingest_bmkg',
@@ -29,17 +28,6 @@ with DAG(
     ingest_aqi = BashOperator(
         task_id='ingest_aqi',
         bash_command='python /opt/airflow/ingestion/api_aqicn/aqicn_to_raw.py'
-    )
-
-    ingest_sql = BashOperator(
-        task_id='ingest_sql',
-        bash_command='python /opt/airflow/ingestion/sql/sql_to_raw.py'
-    )
-
-    # --- GROUP 2: CLEANING ---
-    clean_sheets = BashOperator(
-        task_id='clean_sheets',
-        bash_command='python /opt/airflow/elt/clean_sheets.py'
     )
 
     clean_bmkg = BashOperator(
@@ -52,12 +40,45 @@ with DAG(
         bash_command='python /opt/airflow/elt/clean_aqicn.py'
     )
 
+    ingest_bmkg >> clean_bmkg
+    ingest_aqi >> clean_aqi
+
+
+# ======================================================
+# DAG 2: MAIN PIPELINE (Setiap 1 Jam)
+# ======================================================
+with DAG(
+    dag_id='hygiene_main_pipeline',
+    default_args=default_args,
+    schedule_interval='0 * * * *', # Setiap jam (menit 0)
+    catchup=False,
+    tags=['hourly', 'main']
+) as dag_main:
+
+    # --- INGESTION ---
+    ingest_sheets = BashOperator(
+        task_id='ingest_sheets',
+        bash_command='python /opt/airflow/ingestion/sheets/sheets_to_raw.py'
+    )
+
+    ingest_sql = BashOperator(
+        task_id='ingest_sql',
+        bash_command='python /opt/airflow/ingestion/sql/sql_to_raw.py'
+    )
+
+    # --- CLEANING ---
+    clean_sheets = BashOperator(
+        task_id='clean_sheets',
+        bash_command='python /opt/airflow/elt/clean_sheets.py'
+    )
+
     clean_sql = BashOperator(
         task_id='clean_sql',
         bash_command='python /opt/airflow/elt/clean_sql.py'
     )
 
-    # --- GROUP 3: LOGIC & LOADING ---
+    # --- LOGIC & LOADING ---
+    # Skrip ini akan otomatis mengambil data Clean API terakhir yang tersedia di MinIO
     prescriptive_logic = BashOperator(
         task_id='prescriptive_logic',
         bash_command='python /opt/airflow/elt/prescriptive/prescriptive_logic.py'
@@ -78,12 +99,12 @@ with DAG(
         bash_command='python /opt/airflow/elt/load/load_prescriptive_to_sql.py'
     )
 
-    # --- ALUR DEPENDENCY (FLOW) ---
+    # --- FLOW ---
     ingest_sheets >> clean_sheets
-    ingest_bmkg >> clean_bmkg
-    ingest_aqi >> clean_aqi
     ingest_sql >> clean_sql
 
-    [clean_sheets, clean_bmkg, clean_aqi, clean_sql] >> prescriptive_logic
+    # Prescriptive logic hanya butuh clean data dari Sheets & SQL untuk berjalan,
+    # sementara data API diambil secara pasif dari state terakhir di MinIO.
+    [clean_sheets, clean_sql] >> prescriptive_logic
 
     prescriptive_logic >> [load_activity, load_riwayat_mandi, load_result]
