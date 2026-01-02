@@ -150,7 +150,7 @@ skor_bau = round(min(skor_bau, 10), 2)
 # ======================================================
 skor_aqi = round(min(aqi_latest["aqi"] / 50, 10), 2) if aqi_latest is not None else 0
 
-B_KOTOR, B_BAU, B_AQI, THRESHOLD = 0.4, 0.4, 0.2, 6.5
+B_KOTOR, B_BAU, B_AQI, THRESHOLD = 0.4, 0.4, 0.2, 6.0
 skor_final = round((skor_kekotoran * B_KOTOR) + (skor_bau * B_BAU) + (skor_aqi * B_AQI), 2)
 
 # Logika Rekomendasi yang lebih masuk akal
